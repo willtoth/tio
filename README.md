@@ -427,6 +427,23 @@ Write string to serial device.
 
 Returns the `tio` table.
 
+#### `tio.rx_filter(callback)`
+
+Register a receive filter callback for bytes read from the serial device. The
+callback receives each RX chunk as a Lua string before tio displays it, writes it
+to the log, or forwards it to socket clients.
+
+If the callback returns a string, tio uses that string for the normal RX path. If
+it returns `nil`, tio drops the chunk. Lua strings are byte strings, so filters
+may return embedded NUL bytes and arbitrary binary data.
+
+Only the serial RX path is filtered; keyboard, stdin, socket-client input, and
+`tio.write` output to the serial device are unchanged.
+
+Call `tio.rx_filter(nil)` to disable the filter. If the callback raises an
+error or returns a value other than a string or `nil`, tio reports a warning,
+disables the filter, and passes the current chunk through unchanged.
+
 #### `tio.send(file, protocol)`
 
 Send file using x/y-modem protocol.

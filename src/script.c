@@ -44,6 +44,25 @@
 #define READ_LINE_SIZE 4096 // read_line buffer length
 
 static int device_fd;
+static lua_State *script_state = NULL;
+static int rx_filter_ref = LUA_NOREF;
+static char *rx_filter_buffer = NULL;
+static size_t rx_filter_buffer_size = 0;
+static bool script_exit_registered = false;
+
+static void script_close(void)
+{
+    if (script_state != NULL)
+    {
+        lua_close(script_state);
+        script_state = NULL;
+        rx_filter_ref = LUA_NOREF;
+    }
+
+    free(rx_filter_buffer);
+    rx_filter_buffer = NULL;
+    rx_filter_buffer_size = 0;
+}
 
 static char script_init[] =
 "tio.set = function(arg)\n"
@@ -121,6 +140,33 @@ static void maybe_echo(lua_State *L)
         lua_pushvalue(L, -2);
         lua_call(L, 1, 0);
     }
+}
+
+// lua: tio.rx_filter(function(data) return data end)
+static int api_rx_filter(lua_State *L)
+{
+    if (lua_isnoneornil(L, 1))
+    {
+        if (rx_filter_ref != LUA_NOREF)
+        {
+            luaL_unref(L, LUA_REGISTRYINDEX, rx_filter_ref);
+            rx_filter_ref = LUA_NOREF;
+        }
+        return 0;
+    }
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+
+    if (rx_filter_ref != LUA_NOREF)
+    {
+        luaL_unref(L, LUA_REGISTRYINDEX, rx_filter_ref);
+        rx_filter_ref = LUA_NOREF;
+    }
+
+    lua_pushvalue(L, 1);
+    rx_filter_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    return 0;
 }
 
 // lua: tio.sleep(seconds)
@@ -443,6 +489,7 @@ static void script_file_run(lua_State *L, const char *filename)
 static const struct luaL_Reg tio_lib[] =
 {
     { "echo", api_echo},
+    { "rx_filter", api_rx_filter},
     { "sleep", api_sleep},
     { "msleep", api_msleep},
     { "line_set", line_set},
@@ -490,21 +537,62 @@ static int luaopen_tio(lua_State *L)
 }
 #endif
 
+static lua_State *script_open(void)
+{
+    if (script_state != NULL)
+    {
+        return script_state;
+    }
+
+    script_state = luaL_newstate();
+    if (script_state == NULL)
+    {
+        tio_warning_printf("lua: failed to create Lua state");
+        return NULL;
+    }
+
+    luaL_openlibs(script_state);
+
+#if LUA_VERSION_NUM >= 502
+    luaL_requiref(script_state, "tio", luaopen_tio, 1);
+#else
+    luaL_register(script_state, "tio", tio_lib);
+#endif
+    lua_pop(script_state, 1);
+
+    if (!script_exit_registered)
+    {
+        atexit(script_close);
+        script_exit_registered = true;
+    }
+
+    return script_state;
+}
+
+static void script_close_if_unused(void)
+{
+    if (rx_filter_ref == LUA_NOREF)
+    {
+        script_close();
+    }
+}
+
+void script_set_device_fd(int fd)
+{
+    device_fd = fd;
+}
+
 void script_run(int fd, const char *script_filename)
 {
     lua_State *L;
 
-    device_fd = fd;
+    script_set_device_fd(fd);
 
-    L = luaL_newstate();
-    luaL_openlibs(L);
-
-#if LUA_VERSION_NUM >= 502
-    luaL_requiref(L, "tio", luaopen_tio, 1);
-#else
-    luaL_register(L, "tio", tio_lib);
-#endif
-    lua_pop(L, 1);
+    L = script_open();
+    if (L == NULL)
+    {
+        return;
+    }
 
     // Load lua init script
     script_load(L);
@@ -528,7 +616,106 @@ void script_run(int fd, const char *script_filename)
         script_buffer_run(L, option.script);
     }
 
-    lua_close(L);
+    script_close_if_unused();
+}
+
+bool script_rx_filter_enabled(void)
+{
+    return script_state != NULL && rx_filter_ref != LUA_NOREF;
+}
+
+static void script_rx_filter_disable(void)
+{
+    if (script_state == NULL)
+    {
+        rx_filter_ref = LUA_NOREF;
+        return;
+    }
+
+    if (rx_filter_ref != LUA_NOREF)
+    {
+        luaL_unref(script_state, LUA_REGISTRYINDEX, rx_filter_ref);
+        rx_filter_ref = LUA_NOREF;
+    }
+}
+
+script_rx_filter_result_t script_rx_filter(const char *data,
+                                           size_t length,
+                                           const char **filtered_data,
+                                           size_t *filtered_length)
+{
+    *filtered_data = data;
+    *filtered_length = length;
+
+    if (!script_rx_filter_enabled())
+    {
+        return SCRIPT_RX_FILTER_PASS;
+    }
+
+    lua_rawgeti(script_state, LUA_REGISTRYINDEX, rx_filter_ref);
+    lua_pushlstring(script_state, data, length);
+
+    int error = lua_pcall(script_state, 1, 1, 0);
+    if (error)
+    {
+        const char *message = lua_tostring(script_state, -1);
+        tio_warning_printf("lua: rx_filter failed: %s; disabling filter",
+                           message != NULL ? message : "unknown error");
+        lua_pop(script_state, 1);
+        script_rx_filter_disable();
+        script_close_if_unused();
+        return SCRIPT_RX_FILTER_PASS;
+    }
+
+    if (lua_isnil(script_state, -1))
+    {
+        lua_pop(script_state, 1);
+        return SCRIPT_RX_FILTER_DROP;
+    }
+
+    if (!lua_isstring(script_state, -1))
+    {
+        tio_warning_printf("lua: rx_filter returned %s, expected string or nil; disabling filter",
+                           luaL_typename(script_state, -1));
+        lua_pop(script_state, 1);
+        script_rx_filter_disable();
+        script_close_if_unused();
+        return SCRIPT_RX_FILTER_PASS;
+    }
+
+    size_t output_length = 0;
+    const char *output = lua_tolstring(script_state, -1, &output_length);
+
+    if (output_length == 0)
+    {
+        *filtered_data = "";
+        *filtered_length = 0;
+        lua_pop(script_state, 1);
+        return SCRIPT_RX_FILTER_PASS;
+    }
+
+    if (output_length > rx_filter_buffer_size)
+    {
+        char *buffer = realloc(rx_filter_buffer, output_length);
+        if (buffer == NULL)
+        {
+            tio_warning_printf("lua: rx_filter output allocation failed; passing through input");
+            lua_pop(script_state, 1);
+            return SCRIPT_RX_FILTER_PASS;
+        }
+
+        rx_filter_buffer = buffer;
+        rx_filter_buffer_size = output_length;
+    }
+
+    memcpy(rx_filter_buffer, output, output_length);
+
+    *filtered_data = rx_filter_buffer;
+    *filtered_length = output_length;
+
+    lua_pop(script_state, 1);
+
+    return SCRIPT_RX_FILTER_PASS;
 }
 
 const char *script_run_state_to_string(script_run_t state)

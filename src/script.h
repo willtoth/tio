@@ -21,6 +21,9 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+
 typedef enum
 {
     SCRIPT_RUN_ONCE,
@@ -29,5 +32,17 @@ typedef enum
     SCRIPT_RUN_END,
 } script_run_t;
 
+typedef enum
+{
+    SCRIPT_RX_FILTER_PASS,
+    SCRIPT_RX_FILTER_DROP,
+} script_rx_filter_result_t;
+
+void script_set_device_fd(int fd);
 void script_run(int fd, const char *script_filename);
+bool script_rx_filter_enabled(void);
+script_rx_filter_result_t script_rx_filter(const char *data,
+                                           size_t length,
+                                           const char **filtered_data,
+                                           size_t *filtered_length);
 const char *script_run_state_to_string(script_run_t state);

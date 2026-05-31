@@ -2566,6 +2566,7 @@ int tty_connect(void)
     tio_printf("Connected to %s", device_name);
     connected = true;
     print_tainted = false;
+    script_set_device_fd(device_fd);
 
     /* Fire alert action */
     alert_connect();
@@ -2712,6 +2713,26 @@ int tty_connect(void)
                 /* Update receive statistics */
                 rx_total += bytes_read;
 
+                const char *rx_buffer = input_buffer;
+                size_t rx_buffer_length = bytes_read;
+
+                if (script_rx_filter_enabled())
+                {
+                    script_rx_filter_result_t filter_result = script_rx_filter(input_buffer,
+                                                                               bytes_read,
+                                                                               &rx_buffer,
+                                                                               &rx_buffer_length);
+                    if (filter_result == SCRIPT_RX_FILTER_DROP)
+                    {
+                        continue;
+                    }
+                }
+
+                if (rx_buffer_length == 0)
+                {
+                    continue;
+                }
+
                 // Manage timeout based timestamping in hex mode
                 if ((option.output_mode == OUTPUT_MODE_HEX) && (option.hex_n_value == 0))
                 {
@@ -2737,11 +2758,11 @@ int tty_connect(void)
                 }
 
                 /* Process input byte by byte */
-                for (int i=0; i<bytes_read; i++)
+                for (size_t i=0; i<rx_buffer_length; i++)
                 {
                     static unsigned long count = 0;
 
-                    input_char = input_buffer[i];
+                    input_char = rx_buffer[i];
 
                     /* Handle timestamps */
                     switch (option.output_mode)

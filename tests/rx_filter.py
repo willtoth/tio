@@ -261,6 +261,86 @@ end)
         assert b"filtered" not in output
 
 
+def test_non_string_return_disables_filter_without_coercion():
+    script = """
+tio.rx_filter(function(data)
+    return 123
+end)
+"""
+    with TioSession(script, mute=False) as session:
+        session.write_serial(b"first")
+        output = session.wait_stdout(b"first")
+        assert b"returned number" in output
+        assert b"123" not in output
+
+        session.drain_stdout()
+        session.write_serial(b"second")
+        output = session.wait_stdout(b"second")
+        assert b"123" not in output
+
+
+def test_nil_argument_disables_filter():
+    script = """
+tio.rx_filter(function(data)
+    return "filtered"
+end)
+tio.rx_filter(nil)
+"""
+    with TioSession(script) as session:
+        session.write_serial(b"raw")
+        output = session.wait_stdout(b"raw")
+        assert b"filtered" not in output
+
+
+def test_new_filter_replaces_old_filter():
+    script = """
+tio.rx_filter(function(data)
+    return "old"
+end)
+tio.rx_filter(function(data)
+    return "new"
+end)
+"""
+    with TioSession(script) as session:
+        session.write_serial(b"raw")
+        output = session.wait_stdout(b"new")
+        assert b"old" not in output
+
+
+def test_filter_closure_state_persists_across_chunks():
+    script = """
+local count = 0
+tio.rx_filter(function(data)
+    count = count + 1
+    return tostring(count) .. ":" .. data
+end)
+"""
+    with TioSession(script) as session:
+        session.write_serial(b"A")
+        session.wait_stdout(b"1:A")
+
+        session.drain_stdout()
+        session.write_serial(b"B")
+        session.wait_stdout(b"2:B")
+
+
+def test_self_disabling_filter_uses_current_result_then_turns_off():
+    script = """
+tio.rx_filter(function(data)
+    tio.rx_filter(nil)
+    return (data:gsub("raw", "once"))
+end)
+"""
+    with TioSession(script) as session:
+        session.write_serial(b"raw")
+        session.wait_stdout(b"once")
+
+        session.drain_stdout()
+        session.write_serial(b"raw")
+        output = session.wait_stdout(b"raw")
+        assert b"once" not in output
+
+
 def test_socket_and_log_receive_filtered_output():
     script = """
 tio.rx_filter(function(data)
@@ -289,6 +369,11 @@ def main():
         test_replacement_is_binary_safe,
         test_drop_chunk,
         test_callback_error_disables_filter,
+        test_non_string_return_disables_filter_without_coercion,
+        test_nil_argument_disables_filter,
+        test_new_filter_replaces_old_filter,
+        test_filter_closure_state_persists_across_chunks,
+        test_self_disabling_filter_uses_current_result_then_turns_off,
         test_socket_and_log_receive_filtered_output,
     ]
 

@@ -2715,21 +2715,28 @@ int tty_connect(void)
 
                 const char *rx_buffer = input_buffer;
                 size_t rx_buffer_length = bytes_read;
+                bool rx_filter_used = false;
 
                 if (script_rx_filter_enabled())
                 {
+                    rx_filter_used = true;
                     script_rx_filter_result_t filter_result = script_rx_filter(input_buffer,
                                                                                bytes_read,
                                                                                &rx_buffer,
                                                                                &rx_buffer_length);
                     if (filter_result == SCRIPT_RX_FILTER_DROP)
                     {
+                        script_rx_filter_cleanup();
                         continue;
                     }
                 }
 
                 if (rx_buffer_length == 0)
                 {
+                    if (rx_filter_used)
+                    {
+                        script_rx_filter_cleanup();
+                    }
                     continue;
                 }
 
@@ -2896,6 +2903,11 @@ int tty_connect(void)
                     {
                         do_timestamp = true;
                     }
+                }
+
+                if (rx_filter_used)
+                {
+                    script_rx_filter_cleanup();
                 }
             }
             else if (FD_ISSET(pipefd[0], &rdfs))

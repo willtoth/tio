@@ -673,7 +673,7 @@ script_rx_filter_result_t script_rx_filter(const char *data,
         return SCRIPT_RX_FILTER_DROP;
     }
 
-    if (!lua_isstring(script_state, -1))
+    if (lua_type(script_state, -1) != LUA_TSTRING)
     {
         tio_warning_printf("lua: rx_filter returned %s, expected string or nil; disabling filter",
                            luaL_typename(script_state, -1));
@@ -716,6 +716,11 @@ script_rx_filter_result_t script_rx_filter(const char *data,
     lua_pop(script_state, 1);
 
     return SCRIPT_RX_FILTER_PASS;
+}
+
+void script_rx_filter_cleanup(void)
+{
+    script_close_if_unused();
 }
 
 const char *script_run_state_to_string(script_run_t state)
